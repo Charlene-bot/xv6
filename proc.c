@@ -6,6 +6,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "uproc.h"
 
 static char *states[] = {
 [UNUSED]    "unused",
@@ -143,7 +144,17 @@ allocproc(void)
   p->context = (struct context*)sp;
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
+  
+  //control-p CS333_P1
+#ifdef CS333_P1 
+  p->start_ticks = ticks; 
+#endif //CS333_P1
 
+#ifdef CS333_P2
+  p->cpu_ticks_total = 0; 
+  p->cpu_ticks_in = 0; 
+
+#endif //CS333_P2
   return p;
 }
 
@@ -230,6 +241,13 @@ fork(void)
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
+  
+
+  #ifdef CS333_P2
+  np->uid = curproc->uid; 
+  np->gid = curproc->gid;
+  #endif //CS333_P2
+
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
@@ -384,6 +402,10 @@ scheduler(void)
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
+
+      #ifdef CS333_P2
+        p->cpu_ticks_in = ticks; 
+      #endif //CS333P2
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
@@ -415,6 +437,9 @@ sched(void)
   int intena;
   struct proc *p = myproc();
 
+  #ifdef CS333_P2
+    p->cpu_ticks_total = (p->cpu_ticks_total - p->cpu_ticks_in) + ticks;
+  #endif //CS333_P2
   if(!holding(&ptable.lock))
     panic("sched ptable.lock");
   if(mycpu()->ncli != 1)
@@ -548,17 +573,108 @@ kill(int pid)
 // No lock to avoid wedging a stuck machine further.
 
 #if defined(CS333_P2)
+int 
+getprocs(uint max, struct uproc * table)
+{
+  struct proc *p; 
+  int ppid = 0;
+  int i = 0; 
+
+
+  //Loop over process table looking for process 
+  acquire(&ptable.lock);
+  for(p = ptable.proc; (p < &ptable.proc[NPROC]&& i < max); p++)
+  {
+    
+    if(p->parent == NULL)
+      ppid = p->pid;
+    else 
+      ppid = p->parent->pid; 
+
+    if(p->state == SLEEPING|| p->state == RUNNING || p->state == RUNNABLE ||p->state == ZOMBIE)
+    {
+        table[i].pid = p->pid; 
+        table[i].uid = p->uid; //Proble area 
+        table[i].gid = p->gid; 
+        table[i].ppid = ppid; 
+        table[i].elapsed_ticks = ticks - p->start_ticks; 
+        table[i].CPU_total_ticks = p->cpu_ticks_total; 
+/*        if(p->state == SLEEPING) 
+          safestrcpy(table[i].state, "sleep", sizeof("SLEEPING")); 
+        else if(p->state == RUNNING)
+          safestrcpy(table[i].state, "run", sizeof("RUNNING")); 
+        else if(p->state == ZOMBIE)
+          safestrcpy(table[i].state, "zombie", sizeof("ZOMBIE")); 
+        else
+          safestrcpy(table[i].state, "runnable", sizeof("RUNNABLE")); 
+         */
+        safestrcpy(table[i].state, states[p->state], STRMAX);
+        table[i].size = p->sz; 
+        safestrcpy(table[i].name, p->name, STRMAX); 
+
+        i++; 
+    }
+  }
+
+    release(&ptable.lock); 
+
+return i; 
+}
+
 void
 procdumpP2P3P4(struct proc *p, char *state_string)
 {
-  cprintf("TODO for Project 2, delete this line and implement procdumpP2P3P4() in proc.c to print a row\n");
+  #ifdef CS333_P2
+
+  //Decimal conversion for Elapsed time 
+    int elapsed_time = 0;
+    elapsed_time = ticks - p->start_ticks; 
+    int seconds = (elapsed_time)/1000;
+    int milliseconds = (elapsed_time)%1000;
+    
+    int hundreds = (milliseconds/100);
+    int tens = ((milliseconds%100)/10);
+    int ones = (milliseconds%10);
+    
+  //Decimal conversion for CPU time 
+    int cpu_sec = p->cpu_ticks_total/1000;
+    int cpu_milli = p->cpu_ticks_total%1000; 
+
+    int cpu_hun = cpu_milli/100;
+    int cpu_ten = (cpu_milli%100)/10;
+    int cpu_one = cpu_milli%10; 
+
+    //Checking if ppid == null or not 
+    int ppid = 0; 
+      if(p->parent == NULL)
+        ppid = p->pid;
+      else 
+        ppid = p->parent->pid; 
+
+   //print statement to kernel 
+
+  cprintf("\n%d\t%s\t         %d     \t%d\t%d\t%d.%d%d%d\t%d.%d%d%d\t%s\t%d",p->pid, p->name, p->uid, p->gid, ppid, seconds, hundreds, tens, ones, cpu_sec, cpu_hun, cpu_ten, cpu_one, state_string, p->sz);
+
   return;
 }
+#endif //CS333_P2
 #elif defined(CS333_P1)
 void
-procdumpP1(struct proc *p, char *state_string)
+procdumpP1(struct proc *p, char *state_string) 
 {
-  cprintf("TODO for Project 1, delete this line and implement procdumpP1() in proc.c to print a row\n");
+  #ifdef CS333_P1
+    int elapsed_time = 0; 
+    elapsed_time = ticks - p->start_ticks; 
+    int seconds = (elapsed_time)/1000;
+    int milliseconds = (elapsed_time)%1000;
+    
+    int hundreds = (milliseconds/100);
+    int tens = ((milliseconds%100)/10);
+    int ones = (milliseconds%10);
+
+    cprintf("\n%d\t%s\t      %d.%d%d%d\t%s\t%d\t",p->pid, p->name, seconds, hundreds, tens, ones, state_string, p->sz);
+  #endif //CS333_P1 
+
   return;
 }
 #endif
@@ -574,7 +690,7 @@ procdump(void)
 #if defined(CS333_P4)
 #define HEADER "\nPID\tName         UID\tGID\tPPID\tPrio\tElapsed\tCPU\tState\tSize\t PCs\n"
 #elif defined(CS333_P2)
-#define HEADER "\nPID\tName         UID\tGID\tPPID\tElapsed\tCPU\tState\tSize\t PCs\n"
+#define HEADER "\nPID\tName           UID\tGID\tPPID\tElapsed\tCPU\tState\tSize\t PCs\n"
 #elif defined(CS333_P1)
 #define HEADER "\nPID\tName         Elapsed\tState\tSize\t PCs\n"
 #else

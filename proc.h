@@ -14,9 +14,7 @@ extern struct cpu cpus[NCPU];
 extern int ncpu;
 
 //PAGEBREAK: 17
-// Saved registers for kernel context switches.
-// Don't need to save all the segment registers (%cs, etc),
-// because they are constant across kernel contexts.
+// Saved registers for kernel context switches.  // Don't need to save all the segment registers (%cs, etc), // because they are constant across kernel contexts.
 // Don't need to save %eax, %ecx, %edx, because the
 // x86 convention is that the caller has saved them.
 // Contexts are stored at the bottom of the stack they
@@ -49,8 +47,18 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-};
 
+  uint start_ticks;
+
+#ifdef CS333_P2
+  unsigned int uid;            //User id tracking ownership 
+  unsigned int gid;            //Group id tracking ownership
+  uint cpu_ticks_total;        //ticks elapsed ticks in CPU 
+  uint cpu_ticks_in;           //ticks when scheduled
+
+#endif //CS333_P2
+ 
+};
 // Process memory is laid out contiguously, low addresses first:
 //   text
 //   original data and bss
