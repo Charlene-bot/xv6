@@ -26,10 +26,16 @@ struct ptrs {
   struct proc* tail;
 };
 #endif
+#ifdef CS333_P3 
+#define statecount NELEM(states)
+#endif
 
 static struct {
   struct spinlock lock;
   struct proc proc[NPROC];
+#ifdef CS333_P3
+  struct ptrs list[statecount]; 
+#endif
 } ptable;
 
 // list management function prototypes
@@ -41,7 +47,7 @@ static int  stateListRemove(struct ptrs*, struct proc* p);
 static void assertState(struct proc*, enum procstate, const char *, int);
 #endif // CS333_P3
 #ifdef CS333_P4
-static void printReadyLists(
+static void printReadyLists()
 static void printReadyList(struct proc *, int)
 #endif // CS333_P4
 
@@ -165,7 +171,12 @@ userinit(void)
 {
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
-
+#ifdef CS333_P3
+  acquire(&ptable.lock);
+  initProcessLists(); 
+  initFreelist(); 
+  release(&ptable.lock);
+ #endif
   p = allocproc();
 
   initproc = p;
@@ -271,6 +282,8 @@ fork(void)
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait() to find out it exited.
+
+#ifdef CS333_P3
 void
 exit(void)
 {
@@ -317,8 +330,59 @@ exit(void)
   panic("zombie exit");
 }
 
+#else 
+void
+exit(void)
+{
+  struct proc *curproc = myproc();
+  struct proc *p;
+  int fd;
+
+  if(curproc == initproc)
+    panic("init exiting");
+
+  // Close all open files.
+  for(fd = 0; fd < NOFILE; fd++){
+    if(curproc->ofile[fd]){
+      fileclose(curproc->ofile[fd]);
+      curproc->ofile[fd] = 0;
+    }
+  }
+
+  begin_op();
+  iput(curproc->cwd);
+  end_op();
+  curproc->cwd = 0;
+
+  acquire(&ptable.lock);
+
+  // Parent might be sleeping in wait().
+  wakeup1(curproc->parent);
+
+  // Pass abandoned children to init.
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->parent == curproc){
+      p->parent = initproc;
+      if(p->state == ZOMBIE)
+        wakeup1(initproc);
+    }
+  }
+
+  // Jump into the scheduler, never to return.
+  curproc->state = ZOMBIE;
+#ifdef PDX_XV6
+  curproc->sz = 0;
+#endif // PDX_XV6
+  sched();
+  panic("zombie exit");
+}
+#endif
+
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
+
+
+#ifdef CS333_P3
 int
 wait(void)
 {
@@ -361,7 +425,50 @@ wait(void)
     sleep(curproc, &ptable.lock);  //DOC: wait-sleep
   }
 }
+#else 
+int
+wait(void)
+{
+  struct proc *p;
+  int havekids;
+  uint pid;
+  struct proc *curproc = myproc();
 
+  acquire(&ptable.lock);
+  for(;;){
+    // Scan through table looking for exited children.
+    havekids = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->parent != curproc)
+        continue;
+      havekids = 1;
+      if(p->state == ZOMBIE){
+        // Found one.
+        pid = p->pid;
+        kfree(p->kstack);
+        p->kstack = 0;
+        freevm(p->pgdir);
+        p->pid = 0;
+        p->parent = 0;
+        p->name[0] = 0;
+        p->killed = 0;
+        p->state = UNUSED;
+        release(&ptable.lock);
+        return pid;
+      }
+    }
+
+    // No point waiting if we don't have any children.
+    if(!havekids || curproc->killed){
+      release(&ptable.lock);
+      return -1;
+    }
+
+    // Wait for children to exit.  (See wakeup1 call in proc_exit.)
+    sleep(curproc, &ptable.lock);  //DOC: wait-sleep
+  }
+}
+#endif
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -370,6 +477,8 @@ wait(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
+
+#ifdef CS333_P3
 void
 scheduler(void)
 {
@@ -423,7 +532,61 @@ scheduler(void)
 #endif // PDX_XV6
   }
 }
+#else
+void
+scheduler(void)
+{
+  struct proc *p;
+  struct cpu *c = mycpu();
+  c->proc = 0;
+#ifdef PDX_XV6
+  int idle;  // for checking if processor is idle
+#endif // PDX_XV6
 
+  for(;;){
+    // Enable interrupts on this processor.
+    sti();
+
+#ifdef PDX_XV6
+    idle = 1;  // assume idle unless we schedule a process
+#endif // PDX_XV6
+    // Loop over process table looking for process to run.
+    acquire(&ptable.lock);
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+
+      // Switch to chosen process.  It is the process's job
+      // to release ptable.lock and then reacquire it
+      // before jumping back to us.
+#ifdef PDX_XV6
+      idle = 0;  // not idle this timeslice
+#endif // PDX_XV6
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      #ifdef CS333_P2
+        p->cpu_ticks_in = ticks; 
+      #endif //CS333P2
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      c->proc = 0;
+    }
+    release(&ptable.lock);
+#ifdef PDX_XV6
+    // if idle, wait for next interrupt
+    if (idle) {
+      sti();
+      hlt();
+    }
+#endif // PDX_XV6
+  }
+}
+#endif 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state. Saves and restores
 // intena because intena is a property of this
@@ -454,6 +617,7 @@ sched(void)
 }
 
 // Give up the CPU for one scheduling round.
+#ifdef CS333_P3
 void
 yield(void)
 {
@@ -464,6 +628,18 @@ yield(void)
   sched();
   release(&ptable.lock);
 }
+#else 
+void
+yield(void)
+{
+  struct proc *curproc = myproc();
+
+  acquire(&ptable.lock);  //DOC: yieldlock
+  curproc->state = RUNNABLE;
+  sched();
+  release(&ptable.lock);
+}
+#endif
 
 // A fork child's very first scheduling by scheduler()
 // will swtch here.  "Return" to user space.
@@ -488,6 +664,8 @@ forkret(void)
 
 // Atomically release lock and sleep on chan.
 // Reacquires lock when awakened.
+
+#ifdef CS333_P3
 void
 sleep(void *chan, struct spinlock *lk)
 {
@@ -521,10 +699,46 @@ sleep(void *chan, struct spinlock *lk)
     if (lk) acquire(lk);
   }
 }
+#else 
+void
+sleep(void *chan, struct spinlock *lk)
+{
+  struct proc *p = myproc();
+
+  if(p == 0)
+    panic("sleep");
+
+  // Must acquire ptable.lock in order to
+  // change p->state and then call sched.
+  // Once we hold ptable.lock, we can be
+  // guaranteed that we won't miss any wakeup
+  // (wakeup runs with ptable.lock locked),
+  // so it's okay to release lk.
+  if(lk != &ptable.lock){  //DOC: sleeplock0
+    acquire(&ptable.lock);  //DOC: sleeplock1
+    if (lk) release(lk);
+  }
+  // Go to sleep.
+  p->chan = chan;
+  p->state = SLEEPING;
+
+  sched();
+
+  // Tidy up.
+  p->chan = 0;
+
+  // Reacquire original lock.
+  if(lk != &ptable.lock){  //DOC: sleeplock2
+    release(&ptable.lock);
+    if (lk) acquire(lk);
+  }
+}
+#endif
 
 //PAGEBREAK!
 // Wake up all processes sleeping on chan.
 // The ptable lock must be held.
+#ifdef CS333_P3
 static void
 wakeup1(void *chan)
 {
@@ -534,6 +748,17 @@ wakeup1(void *chan)
     if(p->state == SLEEPING && p->chan == chan)
       p->state = RUNNABLE;
 }
+#else 
+static void
+wakeup1(void *chan)
+{
+  struct proc *p;
+
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+    if(p->state == SLEEPING && p->chan == chan)
+      p->state = RUNNABLE;
+}
+#endif
 
 // Wake up all processes sleeping on chan.
 void
@@ -547,6 +772,7 @@ wakeup(void *chan)
 // Kill the process with the given pid.
 // Process won't exit until it returns
 // to user space (see trap in trap.c).
+#ifdef CS333_P3
 int
 kill(int pid)
 {
@@ -566,6 +792,27 @@ kill(int pid)
   release(&ptable.lock);
   return -1;
 }
+#else 
+int
+kill(int pid)
+{
+  struct proc *p;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->pid == pid){
+      p->killed = 1;
+      // Wake process from sleep if necessary.
+      if(p->state == SLEEPING)
+        p->state = RUNNABLE;
+      release(&ptable.lock);
+      return 0;
+    }
+  }
+  release(&ptable.lock);
+  return -1;
+}
+#endif
 
 //PAGEBREAK: 36
 // Print a process listing to console.  For debugging.
@@ -594,20 +841,11 @@ getprocs(uint max, struct uproc * table)
     if(p->state == SLEEPING|| p->state == RUNNING || p->state == RUNNABLE ||p->state == ZOMBIE)
     {
         table[i].pid = p->pid; 
-        table[i].uid = p->uid; //Proble area 
+        table[i].uid = p->uid; 
         table[i].gid = p->gid; 
         table[i].ppid = ppid; 
         table[i].elapsed_ticks = ticks - p->start_ticks; 
         table[i].CPU_total_ticks = p->cpu_ticks_total; 
-/*        if(p->state == SLEEPING) 
-          safestrcpy(table[i].state, "sleep", sizeof("SLEEPING")); 
-        else if(p->state == RUNNING)
-          safestrcpy(table[i].state, "run", sizeof("RUNNING")); 
-        else if(p->state == ZOMBIE)
-          safestrcpy(table[i].state, "zombie", sizeof("ZOMBIE")); 
-        else
-          safestrcpy(table[i].state, "runnable", sizeof("RUNNABLE")); 
-         */
         safestrcpy(table[i].state, states[p->state], STRMAX);
         table[i].size = p->sz; 
         safestrcpy(table[i].name, p->name, STRMAX); 

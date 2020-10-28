@@ -55,9 +55,9 @@ struct proc {
   unsigned int gid;            //Group id tracking ownership
   uint cpu_ticks_total;        //ticks elapsed ticks in CPU 
   uint cpu_ticks_in;           //ticks when scheduled
-
 #endif //CS333_P2
- 
+#ifdef CS333_P3
+ struct proc *next  
 };
 // Process memory is laid out contiguously, low addresses first:
 //   text
