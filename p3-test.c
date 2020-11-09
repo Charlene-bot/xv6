@@ -1,4 +1,4 @@
-#ifdef CS333_P2
+#ifdef CS333_P3
 // A starting point for writing your own p3 test program(s).
 // Notes
 // 1. The parent never gets to the wait() call, so killing any child will cause that

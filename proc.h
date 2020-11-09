@@ -57,8 +57,10 @@ struct proc {
   uint cpu_ticks_in;           //ticks when scheduled
 #endif //CS333_P2
 #ifdef CS333_P3
- struct proc *next  
+ struct proc *next;
+#endif
 };
+
 // Process memory is laid out contiguously, low addresses first:
 //   text
 //   original data and bss

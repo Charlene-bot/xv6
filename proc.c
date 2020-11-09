@@ -114,25 +114,60 @@ allocproc(void)
 {
   struct proc *p;
   char *sp;
-
+  int found = 0; 
   acquire(&ptable.lock);
-  int found = 0;
+  
+#ifdef CS333_P3
+  if(ptable.list[UNUSED].head){
+    p = ptable.list[UNUSED].head; 
+    found = 1; 
+  }
+  if(!found){
+    release(&ptable.lock); 
+    return 0; 
+  }
+#else
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == UNUSED) {
       found = 1;
       break;
-    }
+      }
   if (!found) {
-    release(&ptable.lock);
-    return 0;
+      release(&ptable.lock);
+      return 0;
   }
+#endif
+#ifdef CS333_P3
+  if(found){
+    if(stateListRemove(&ptable.list[UNUSED], p) == -1){
+      panic("failed to remove the process from unused list in allocproc()"); 
+    }
+
+    assertState(p, UNUSED, __FUNCTION__, __LINE__);
+  }
+#endif 
   p->state = EMBRYO;
+#ifdef CS333_P3
+  stateListAdd(&ptable.list[EMBRYO], p); 
+#endif
   p->pid = nextpid++;
   release(&ptable.lock);
 
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
+#ifdef CS333_P3
+  acquire(&ptable.lock); 
+  if(stateListRemove(&ptable.list[EMBRYO], p) == -1){
+    panic("Failed to remove from EMBRYO list after kernel stack allocation failure in allocproc()"); 
+    assertState(p, EMBRYO, __FUNCTION__, __LINE__); 
+  }
+#endif
     p->state = UNUSED;
+#ifdef CS333_P3
+  stateListAdd(&ptable.list[UNUSED], p); 
+  release(&ptable.lock);
+#endif
+	
     return 0;
   }
   sp = p->kstack + KSTACKSIZE;
@@ -151,7 +186,6 @@ allocproc(void)
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
   
-  //control-p CS333_P1
 #ifdef CS333_P1 
   p->start_ticks = ticks; 
 #endif //CS333_P1
@@ -174,12 +208,12 @@ userinit(void)
 #ifdef CS333_P3
   acquire(&ptable.lock);
   initProcessLists(); 
-  initFreelist(); 
+  initFreeList(); 
   release(&ptable.lock);
  #endif
   p = allocproc();
-
   initproc = p;
+
   if((p->pgdir = setupkvm()) == 0)
     panic("userinit: out of memory?");
   inituvm(p->pgdir, _binary_initcode_start, (int)_binary_initcode_size);
@@ -201,12 +235,21 @@ userinit(void)
   // writes to be visible, and the lock is also needed
   // because the assignment might not be atomic.
   acquire(&ptable.lock);
+#ifdef CS333_P3
+  if(stateListRemove(&ptable.list[EMBRYO], p) == -1){
+    panic("failed to remove from EMBRYO list after successful allocation in userinit()"); 
+  }
+  assertState(p, EMBRYO, __FUNCTION__, __LINE__); 
+#endif 
   p->state = RUNNABLE;
+#ifdef CS333_P3
+  stateListAdd(&ptable.list[RUNNABLE], p); 
+#endif
   release(&ptable.lock);
 }
 
 // Grow current process's memory by n bytes.
-// Return 0 on success, -1 on failure.
+                                                              // Return 0 on success, -1 on failure.
 int
 growproc(int n)
 {
@@ -246,7 +289,20 @@ fork(void)
   if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
     kfree(np->kstack);
     np->kstack = 0;
+#ifdef CS333_P3
+  acquire(&ptable.lock); 
+  if(stateListRemove(&ptable.list[EMBRYO], np) == -1){
+    panic("failed to remove from EMBRYO list in fork() after page directory allocation failure");
+  }
+  assertState(np, EMBRYO, __FUNCTION__, __LINE__); 
+  release(&ptable.lock);
+#endif
     np->state = UNUSED;
+#ifdef CS333_P3
+  acquire(&ptable.lock);
+  stateListAdd(&ptable.list[UNUSED], np); 
+  release(&ptable.lock); 
+#endif
     return -1;
   }
   np->sz = curproc->sz;
@@ -273,7 +329,17 @@ fork(void)
   pid = np->pid;
 
   acquire(&ptable.lock);
+
+#ifdef CS333_P3
+  if(stateListRemove(&ptable.list[EMBRYO], np) == -1){
+    panic("failed to remove from EMBRYO list on successful fork()"); 
+  }
+  assertState(np, EMBRYO, __FUNCTION__, __LINE__); 
+#endif
   np->state = RUNNABLE;
+#ifdef CS333_P3
+  stateListAdd(&ptable.list[RUNNABLE], np); 
+#endif
   release(&ptable.lock);
 
   return pid;
@@ -312,17 +378,59 @@ exit(void)
   // Parent might be sleeping in wait().
   wakeup1(curproc->parent);
 
-  // Pass abandoned children to init.
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-    if(p->parent == curproc){
+  //Search lists for abandoned children and pass them to init
+  //embryo 
+  p = ptable.list[EMBRYO].head; 
+  while(p){
+    if(p->parent == curproc)
       p->parent = initproc;
-      if(p->state == ZOMBIE)
-        wakeup1(initproc);
-    }
+    p = p->next;
   }
+
+  //sleeping 
+  p = ptable.list[SLEEPING].head;
+  while(p){
+    if(p->parent == curproc)
+      p->parent = initproc; 
+    p = p->next;
+  }
+
+  //runnable 
+  p = ptable.list[RUNNABLE].head;
+  while(p){
+    if(p->parent == curproc)
+      p->parent = initproc; 
+    p = p->next;
+  }
+
+ //running  
+  p = ptable.list[RUNNING].head;
+  while(p){
+    if(p->parent == curproc)
+      p->parent = initproc; 
+    p = p->next;
+  }
+
+  //zombie
+  p = ptable.list[ZOMBIE].head;
+  while(p){
+    if(p->parent == curproc){
+      p->parent = initproc; 
+      wakeup1(initproc); 
+    }
+    p = p->next; 
+  }
+
+  if(stateListRemove(&ptable.list[RUNNING], curproc) == -1){
+    panic("failed to remove process from running list in exit()");
+  }
+  assertState(curproc, RUNNING, __FUNCTION__, __LINE__); 
 
   // Jump into the scheduler, never to return.
   curproc->state = ZOMBIE;
+
+  stateListAdd(&ptable.list[ZOMBIE], curproc); 
+
 #ifdef PDX_XV6
   curproc->sz = 0;
 #endif // PDX_XV6
@@ -380,27 +488,26 @@ exit(void)
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
-
-
 #ifdef CS333_P3
 int
 wait(void)
 {
   struct proc *p;
-  int havekids;
+  int havekids = 0; 
   uint pid;
   struct proc *curproc = myproc();
 
   acquire(&ptable.lock);
   for(;;){
-    // Scan through table looking for exited children.
+
     havekids = 0;
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->parent != curproc)
-        continue;
-      havekids = 1;
-      if(p->state == ZOMBIE){
-        // Found one.
+    // Scan through table looking for exited children.
+    //scanning through the lists to check if they have kids 
+    p = ptable.list[ZOMBIE].head; 
+    while(p && !havekids){
+      if(p->parent == curproc){
+        havekids = 1;
+        //Found one
         pid = p->pid;
         kfree(p->kstack);
         p->kstack = 0;
@@ -409,10 +516,43 @@ wait(void)
         p->parent = 0;
         p->name[0] = 0;
         p->killed = 0;
-        p->state = UNUSED;
-        release(&ptable.lock);
-        return pid;
+
+        if(stateListRemove(&ptable.list[ZOMBIE], p) == -1){
+          panic("failed to remove process from zombie list in wait()"); 
+        }
+        assertState(p, ZOMBIE, __FUNCTION__, __LINE__); 
+        p->state = UNUSED; ;
+        stateListAdd(&ptable.list[UNUSED], p);
+
+        release(&ptable.lock); 
+        return pid; 
+
+    }
+      p = p->next; 
+  }
+
+    p = ptable.list[RUNNABLE].head; 
+    while(p && !havekids){
+      if(p->parent == curproc){
+        havekids = 1; 
       }
+      p = p->next; 
+    }
+
+    p = ptable.list[RUNNING].head; 
+    while(p && !havekids){
+      if(p->parent == curproc){
+        havekids = 1; 
+      }
+      p = p->next; 
+    }
+
+    p = ptable.list[SLEEPING].head; 
+    while(p && !havekids){
+      if(p->parent == curproc){
+        havekids = 1; 
+      }
+      p = p->next; 
     }
 
     // No point waiting if we don't have any children.
@@ -424,6 +564,8 @@ wait(void)
     // Wait for children to exit.  (See wakeup1 call in proc_exit.)
     sleep(curproc, &ptable.lock);  //DOC: wait-sleep
   }
+
+  return 0; 
 }
 #else 
 int
@@ -496,22 +638,26 @@ scheduler(void)
 #ifdef PDX_XV6
     idle = 1;  // assume idle unless we schedule a process
 #endif // PDX_XV6
-    // Loop over process table looking for process to run.
+
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
+    p = ptable.list[RUNNABLE].head; 
+    if(p){
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
-#ifdef PDX_XV6
-      idle = 0;  // not idle this timeslice
-#endif // PDX_XV6
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
+     if(stateListRemove(&ptable.list[RUNNABLE], p) == -1){
+       panic("failed to remove the process we will run from RUNNABLE list in scheduler()"); 
+      }
+      assertState(p, RUNNABLE, __FUNCTION__, __LINE__); 
 
+#ifdef PDX_XV6
+    idle = 0;  // not idle this timeslice 
+#endif // PDX_XV6
+      c->proc = p; 
+      switchuvm(p); 
+      p->state = RUNNING;
+      stateListAdd(&ptable.list[RUNNING], p); 
       #ifdef CS333_P2
         p->cpu_ticks_in = ticks; 
       #endif //CS333P2
@@ -521,7 +667,7 @@ scheduler(void)
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
-    }
+     }
     release(&ptable.lock);
 #ifdef PDX_XV6
     // if idle, wait for next interrupt
@@ -565,7 +711,6 @@ scheduler(void)
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
-
       #ifdef CS333_P2
         p->cpu_ticks_in = ticks; 
       #endif //CS333P2
@@ -624,7 +769,12 @@ yield(void)
   struct proc *curproc = myproc();
 
   acquire(&ptable.lock);  //DOC: yieldlock
+  if(stateListRemove(&ptable.list[RUNNING], curproc) == -1){
+    panic("failed to remove process from Running state in yield()"); 
+  }
+  assertState(curproc, RUNNING, __FUNCTION__, __LINE__); 
   curproc->state = RUNNABLE;
+  stateListAdd(&ptable.list[RUNNABLE], curproc); 
   sched();
   release(&ptable.lock);
 }
@@ -686,8 +836,12 @@ sleep(void *chan, struct spinlock *lk)
   }
   // Go to sleep.
   p->chan = chan;
+  if(stateListRemove(&ptable.list[RUNNING], p) == -1){
+    panic("failed to remove from RUNNING state in sleep()");
+  }
+  assertState(p, RUNNING, __FUNCTION__, __LINE__); 
   p->state = SLEEPING;
-
+  stateListAdd(&ptable.list[SLEEPING], p); 
   sched();
 
   // Tidy up.
@@ -743,10 +897,18 @@ static void
 wakeup1(void *chan)
 {
   struct proc *p;
-
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+  p = ptable.list[SLEEPING].head; 
+  while(p){
+    if( p->chan == chan){
+      if(stateListRemove(&ptable.list[SLEEPING], p) == -1){
+        panic("failed to remove process from SLEEPING state in wakeup1()");      }
+    
+      assertState(p, SLEEPING, __FUNCTION__, __LINE__); 
       p->state = RUNNABLE;
+      stateListAdd(&ptable.list[RUNNABLE], p);  
+    }
+    p = p->next; 
+  }
 }
 #else 
 static void
@@ -777,17 +939,66 @@ int
 kill(int pid)
 {
   struct proc *p;
-
   acquire(&ptable.lock);
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+
+  //scanning through the lists to kill and wakeup if necessary
+  p = ptable.list[RUNNING].head;
+  while(p){
     if(p->pid == pid){
-      p->killed = 1;
+      p->killed = 1;   
+      release(&ptable.lock);
+      return 0; 
+    }
+    p = p->next; 
+  }
+
+  p = ptable.list[RUNNABLE].head;
+  while(p){
+    if(p->pid == pid){
+      p->killed = 1;   
+      release(&ptable.lock);
+      return 0; 
+    }
+    p = p->next; 
+  }
+  
+  p = ptable.list[EMBRYO].head;
+  while(p){
+    if(p->pid == pid){
+      p->killed = 1;   
+      release(&ptable.lock);
+      return 0; 
+    }
+    p = p->next; 
+  }
+
+  p = ptable.list[ZOMBIE].head;
+  while(p){
+    if(p->pid == pid){
+      p->killed = 1;   
+      release(&ptable.lock);
+      return 0; 
+    }
+    p = p->next; 
+  }
+
+  p = ptable.list[SLEEPING].head;
+  while(p){
+    if(p->pid == pid){
+      p->killed = 1;   
+
       // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
-        p->state = RUNNABLE;
+      if(stateListRemove(&ptable.list[SLEEPING], p) == -1){
+          panic("failed to remove the process from the sleeping lisr in kill()"); 
+        }
+
+      assertState(p, SLEEPING, __FUNCTION__, __LINE__); 
+      p->state = RUNNABLE;
+      stateListAdd(&ptable.list[RUNNABLE], p);
       release(&ptable.lock);
       return 0;
     }
+    p = p->next; 
   }
   release(&ptable.lock);
   return -1;
